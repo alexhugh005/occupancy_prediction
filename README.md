@@ -10,6 +10,9 @@ Case study implementation for operationalizing an XGBoost occupancy classifier.
 - Files: `data/datatraining.txt`, `data/datatest.txt`, `data/datatest2.txt`
 
 ---
+# Environment Setup
+
+"python -m pip install -r requirements.txt"
 
 ## Task 1: Training Pipeline – Workflow Steps
 
