@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Tests and tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Training outputs from src/train.py
+# models/: model.joblib, feature_engineer.joblib, metrics.json, run_*/
+# results/: roc_auc_curve.png and other evaluation plots
+# data/ is kept — those UCI text files are the source dataset.
+models/*
+results/*
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# OS and editors
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*~
+
+# Logs
+*.log

@@ -1,0 +1,22 @@
+# Training pipeline container
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# System deps (minimal)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY src/ ./src/
+COPY data/ ./data/
+
+ENV PYTHONPATH=/app/src
+ENV MODEL_DIR=/app/models
+
+# Default: run training
+ENTRYPOINT ["python", "src/train.py"]
+CMD ["--train-path", "data/datatraining.txt", "--test-path", "data/datatest.txt", "--model-dir", "models", "--n-iter", "10"]

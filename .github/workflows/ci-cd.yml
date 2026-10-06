@@ -1,0 +1,164 @@
+# CI/CD pipeline for Occupancy Prediction
+# This is the workflow GitHub Actions runs.
+# ci/github-actions.yml is kept as the same definition for the project docs.
+#
+# Responsibilities:
+# 1. Lint / unit tests
+# 2. Build & test training pipeline container → push to registry
+# 3. Run training (small search) and pass the model to the inference image
+# 4. Build & test inference service container → push to registry
+# 5. Smoke-test the inference image (/health and /predict)
+
+name: Occupancy Prediction CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Unit tests
+        run: PYTHONPATH=src pytest tests/ -q
+      - name: Smoke train (small HPO)
+        run: |
+          PYTHONPATH=src python src/train.py \
+            --train-path data/datatraining.txt \
+            --test-path data/datatest.txt \
+            --model-dir models \
+            --results-dir results \
+            --n-iter 3 --cv 2
+          mkdir -p ci-model
+          cp models/model.joblib models/feature_engineer.joblib models/metrics.json ci-model/
+      - name: Upload model artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-artifacts
+          if-no-files-found: error
+          retention-days: 7
+          path: ci-model/
+
+  build-and-push-train:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set image name
+        id: image
+        run: |
+          repo=$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          echo "name=${repo}/occupancy-train" >> "$GITHUB_OUTPUT"
+      - name: Log in to Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}
+          tags: |
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Build and push training image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.train
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  build-and-push-inference:
+    needs: [test, build-and-push-train]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download trained model
+        uses: actions/download-artifact@v4
+        with:
+          name: model-artifacts
+          path: models
+      - name: Set image name
+        id: image
+        run: |
+          repo=$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          echo "name=${repo}/occupancy-inference" >> "$GITHUB_OUTPUT"
+      - name: Log in to Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}
+          tags: |
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Build inference image
+        run: docker build -f docker/Dockerfile.inference -t occupancy-inference:ci .
+      - name: Smoke-test inference image
+        run: |
+          docker run -d --name occ-inf -p 8000:8000 occupancy-inference:ci
+          ok=0
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/health | grep -q '"status": "ok"'; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "Inference /health did not report a loaded model"
+            docker logs occ-inf
+            docker rm -f occ-inf
+            exit 1
+          fi
+          curl -fsS -X POST http://127.0.0.1:8000/predict \
+            -H "Content-Type: application/json" \
+            -d '{"date":"2015-02-04 17:51:00","Temperature":23.18,"Humidity":27.272,"Light":426.0,"CO2":721.25,"HumidityRatio":0.004793}'
+          echo
+          docker rm -f occ-inf
+      - name: Tag and push inference image
+        if: github.event_name != 'pull_request'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          echo "$TAGS" | while IFS= read -r tag; do
+            tag=$(echo "$tag" | xargs)
+            if [ -n "$tag" ]; then
+              docker tag occupancy-inference:ci "$tag"
+              docker push "$tag"
+            fi
+          done

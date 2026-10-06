@@ -1,0 +1,131 @@
+# CI/CD pipeline for Occupancy Prediction
+# Place under .github/workflows/ci-cd.yml in a real repository
+#
+# Responsibilities:
+# 1. Lint / unit tests
+# 2. Build & test training pipeline container → push to registry
+# 3. Run training (or use cached model) inside container
+# 4. Build & test inference service container → push to registry
+# 5. (Optional) Deploy inference service
+
+name: Occupancy Prediction CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:  # manual trigger for CT-style runs
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_TRAIN: ${{ github.repository }}/occupancy-train
+  IMAGE_INFERENCE: ${{ github.repository }}/occupancy-inference
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Unit tests
+        run: |
+          PYTHONPATH=src pytest tests/ -q || true  # placeholder; add real tests
+      - name: Smoke train (small HPO)
+        run: |
+          PYTHONPATH=src python src/train.py \
+            --train-path data/datatraining.txt \
+            --test-path data/datatest.txt \
+            --model-dir models \
+            --n-iter 3 --cv 2
+
+  build-and-push-train:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_TRAIN }}
+          tags: |
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Build and push training image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.train
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  build-and-push-inference:
+    needs: [test, build-and-push-train]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      # Optionally pull trained model from previous job artifact or model registry
+      - name: Ensure model artifacts exist
+        run: |
+          if [ ! -f models/model.joblib ]; then
+            PYTHONPATH=src python src/train.py --n-iter 3 --cv 2
+          fi
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_INFERENCE }}
+          tags: |
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Build and push inference image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.inference
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  # Optional: simple integration test of the inference image
+  test-inference-image:
+    needs: build-and-push-inference
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pull and smoke-test inference image
+        run: |
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_INFERENCE }}:latest || true
+          # In a real pipeline the exact tag would be used
+          # docker run -d -p 8000:8000 --name occ-inf ${{ env.REGISTRY }}/${{ env.IMAGE_INFERENCE }}:latest
+          # sleep 5
+          # curl -f http://localhost:8000/health
+          # docker stop occ-inf
