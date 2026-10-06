@@ -131,20 +131,30 @@ jobs:
       - name: Smoke-test inference image
         run: |
           docker run -d --name occ-inf -p 8000:8000 occupancy-inference:ci
-          ok=0
-          for _ in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8000/health | grep -q '"status": "ok"'; then
-              ok=1
+
+          echo "Waiting for inference server to become healthy..."
+          healthy=0
+          for i in {1..30}; do
+            # Starlette emits compact JSON: {"status":"ok","model_dir":"..."}.
+            # "model_not_loaded" must not count as healthy.
+            body=$(curl -sf http://localhost:8000/health || true)
+            if echo "$body" | grep -q '"status":"ok"'; then
+              echo "Health check passed"
+              docker logs occ-inf
+              healthy=1
               break
             fi
+            echo "Attempt $i/30 – not ready yet"
             sleep 2
           done
-          if [ "$ok" -ne 1 ]; then
-            echo "Inference /health did not report a loaded model"
+
+          if [ "$healthy" -ne 1 ]; then
+            echo "Health check failed after 60s"
             docker logs occ-inf
             docker rm -f occ-inf
             exit 1
           fi
+
           curl -fsS -X POST http://127.0.0.1:8000/predict \
             -H "Content-Type: application/json" \
             -d '{"date":"2015-02-04 17:51:00","Temperature":23.18,"Humidity":27.272,"Light":426.0,"CO2":721.25,"HumidityRatio":0.004793}'
